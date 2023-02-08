@@ -1,0 +1,818 @@
+---
+title: "Project_Gr4"
+author: " Group-4 Team"
+date: "2/17/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+## Loading libraries
+
+library(ggplot2) 
+library(reshape2) 
+library(tidyverse) 
+library(naniar)
+library(dplyr)
+library(caret)
+library(MASS) 
+library(ISLR)
+library(pROC)
+library(Hmisc)
+library(DataExplorer)
+library(GGally)
+library(mice)
+library(VIM)
+library(lubridate)
+library(rpart)
+library(rpart.plot)
+library(ggcorrplot)
+library(corrplot)
+library(plyr)
+library(ggpubr)
+
+#set to current directory
+tryCatch({
+  setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+  }, error=function(cond){message(paste("cannot change working directory"))
+})
+
+############ Read datasets #############
+#fill invalid entries found during initial observation with NA
+modelData <- read.csv("C:/UNO/Courses/4Spring2021/ISQA8720_Applied_ML/03_Course Project/Data/modeldata_aug2020.csv", header = TRUE, na.strings=c("","Not Available","999-UNKNOWN","99-UNKNOWN","CONFLICT","NA"))
+testData <- read.csv(file = "C:/UNO/Courses/4Spring2021/ISQA8720_Applied_ML/03_Course Project/Data/testdata_aug2020.csv", header = TRUE, na.strings=c("","Not Available","99-UNKNOWN","999-UNKNOWN","CONFLICT","NA"))
+firmoData <- read.csv(file="C:/UNO/Courses/4Spring2021/ISQA8720_Applied_ML/03_Course Project/Data/FirmographicData_Aug2020.csv", header = TRUE, na.strings=c("","Not Available","99-UNKNOWN","999-UNKNOWN","CONFLICT","NA", "-", "."))
+
+############ summary #############
+summary(firmoData)
+summary(modelData)
+summary(testData)
+
+############ missing values percentages #############
+plot_missing(modelData)
+plot_missing(testData)
+plot_missing(firmoData)
+
+############ Left join merge #############
+#Merging Firmographic data and model data with left join
+modelMerged <- modelData %>% left_join(firmoData,by="Company_Number")
+#Merging Firmographic data and test data with left join
+testMerged <- testData %>% left_join(firmoData,by="Company_Number")
+
+############ summary of merged model and test datasets  #############
+summary (modelMerged)
+summary (testMerged)
+
+############ missing values percentages #############
+plot_missing(modelMerged)
+plot_missing(testMerged)
+
+
+############ extract  variables ###########
+model_var <- c("churned", "churn_date" , "Company_Creation_Date", "total_products", "total_transactions", "total_revenue", "total_usage", "total_accounts", "HQ_Employee_Count", "NAICS2", "NAICS3", "Business_Code")
+modelFinal <- modelMerged[model_var]
+
+test_var <- c("Company_Creation_Date", "total_products", "total_transactions", "total_revenue", "total_usage", "total_accounts", "HQ_Employee_Count", "NAICS2", "NAICS3", "Business_Code")
+testFinal <- testMerged[test_var]
+
+str(modelFinal)
+str(testFinal)
+
+############ Data preparation (& filling NAs) ###########
+
+############ variable:churned ###########
+modelFinal$churned[modelFinal$churned == 1] <- "yes"
+modelFinal$churned[modelFinal$churned == 0] <- "no"
+modelFinal$churned <- as.factor(modelFinal$churned)
+
+############ variable:churn_date ###########
+modelFinal$churn_date = parse_date_time(modelFinal$churn_date, orders = "%m/%d/%y")
+modelFinal$churn_date = format(modelFinal$churn_date, "%Y")
+modelFinal$churn_date = as.numeric(modelFinal$churn_date)
+modelFinal$churn_date [is.na(modelFinal$churn_date)] <- "unknown"
+#temporarily convert to categorical so that no to include in cleaning
+modelFinal$churn_date <- as.factor(modelFinal$churn_date)
+
+############ variable:Company_Creation_Date ###########
+#convert Company_Creation_Date to ageInYears
+modelFinal$Company_Creation_Date = parse_date_time(modelFinal$Company_Creation_Date, orders = "%d %b %Y:%H:%M:%S")
+modelFinal$Company_Creation_Date = format(modelFinal$Company_Creation_Date, "%Y")
+modelFinal$Company_Creation_Date = as.numeric(modelFinal$Company_Creation_Date)
+modelFinal$ageInYears <- modelFinal [,c("Company_Creation_Date")] - 1970  
+drop <- c("Company_Creation_Date")
+modelFinal <- modelFinal[ , !(names(modelFinal) %in% drop)]
+
+testFinal$Company_Creation_Date = parse_date_time(testFinal$Company_Creation_Date, orders = "%d %b %Y:%H:%M:%S")
+testFinal$Company_Creation_Date = format(testFinal$Company_Creation_Date, "%Y")
+testFinal$Company_Creation_Date = as.numeric(testFinal$Company_Creation_Date)
+testFinal$ageInYears <- testFinal [,c("Company_Creation_Date")] -1970 
+drop <- c("Company_Creation_Date")
+testFinal <- testFinal[ , !(names(testFinal) %in% drop)]
+
+############ variable:NAICS2 and NAICS3 ###########
+# NAICS2 and NAICS3 will be removed and replaced with single variable "NAICS_Code"
+#some values are 0, replace with NA
+#finally replace all NAs with "Unknown". "Unknown" will be one of the factor later
+modelFinal$NAICS_Code <- modelFinal$NAICS2
+modelFinal$NAICS_Code[modelFinal$NAICS_Code == 0] <- NA
+modelFinal$NAICS_Code[is.na(modelFinal$NAICS_Code)] <- "unknown"
+modelFinal$NAICS_Code <- as.factor(modelFinal$NAICS_Code)
+#recode levels which are easy to read and understand
+levels(modelFinal$NAICS_Code) <- c("Agriculture11", "Mining21", "utilities22", "Construction23", "Manufacturing31", "Manufacturing32", "Manufacturing33", "wholesale42", "Retail44", "Retail45",  "Transport48", "Transport49", "IT51", "Finance52", "Realestate53", "Professional54", "Management55", "Admin56", "Education61", "Health62", "Arts71", "hospitality72", "Other81", "pubadmin92", "Unknown")
+drop <- c("NAICS2","NAICS3")
+modelFinal <- modelFinal[ , !(names(modelFinal) %in% drop)]
+
+#for test data
+testFinal$NAICS_Code <- testFinal$NAICS2
+testFinal$NAICS_Code[testFinal$NAICS_Code == 0] <- NA
+testFinal$NAICS_Code[is.na(testFinal$NAICS_Code)] <- "unknown"
+testFinal$NAICS_Code <- as.factor(testFinal$NAICS_Code)
+#recode levels which are easy to read and understand
+levels(testFinal$NAICS_Code) <- c("Agriculture11", "Mining21", "utilities22", "Construction23", "Manufacturing31", "Manufacturing32", "Manufacturing33", "wholesale42", "Retail44", "Retail45",  "Transport48", "Transport49", "IT51", "Finance52", "Realestate53", "Professional54", "Management55", "Admin56", "Education61", "Health62", "Arts71", "hospitality72", "Other81", "pubadmin92", "Unknown")
+drop <- c("NAICS2","NAICS3")
+testFinal <- testFinal[ , !(names(testFinal) %in% drop)]
+
+
+############ variable:Business_Code ###########
+# replace all NAs with "Unknown". "Unknown" will be one of the factor 
+#convert Business_Code to factor
+modelFinal$Business_Code[is.na(modelFinal$Business_Code)] <- "unknown"
+modelFinal$Business_Code <- as.factor(modelFinal$Business_Code)
+
+#for test data
+testFinal$Business_Code[is.na(testFinal$Business_Code)] <- "unknown"
+testFinal$Business_Code <- as.factor(testFinal$Business_Code)
+
+############ summary after data preparation #############
+summary(modelFinal)
+summary(testFinal)
+
+############ missing values percentages #############
+plot_missing(modelFinal)
+plot_missing(testFinal)
+
+########## data partition #############
+
+target_var <- 'churned'
+set.seed(1)
+trainIndex <- createDataPartition(modelFinal[[target_var]], p = 0.7, list = FALSE)
+data_train <- modelFinal[trainIndex,]
+data_test <- modelFinal[-trainIndex,]
+
+########## bagImpute to fill NAs #############
+
+data_train_num <- data_train %>% select_if(is.numeric)
+data_train_non_num <- data_train %>% select_if(~!is.numeric(.x))
+
+data_test_num <- data_test %>% select_if(is.numeric)
+data_test_non_num <- data_test %>% select_if(~!is.numeric(.x))
+
+bgimp <- preProcess(data_train_num, method = "bagImpute")
+
+data_train_bg <- cbind(data_train_non_num, predict(bgimp, data_train_num))
+
+data_test_bg <- cbind(data_test_non_num, predict(bgimp, data_test_num))
+
+
+####### standardize all the observations########
+stnd <- preProcess(data_train_bg, method = c("center", "scale"))
+
+data_train_bg_st <- predict(stnd, data_train_bg)
+
+data_test_bg_st <- predict(stnd, data_test_bg)
+
+dataset_train_preproc <- data_train_bg_st
+dataset_test_preproc <- data_test_bg_st
+
+summary(dataset_train_preproc)
+summary(dataset_test_preproc)
+
+plot_missing(dataset_train_preproc)
+plot_missing(dataset_test_preproc)
+
+
+######## #Feature engineering for NUMERICAL VARIABLE ############
+# find correlation between numerical variables
+# there is a positive correlation between following variables
+# total_transactions & total_products   
+# total_usage & total_revenue       
+# one of them can be eliminated from the modelling
+
+dataNumeric <- dataset_train_preproc %>% select_if(is.numeric)
+cormat <- cor(dataNumeric)
+ggcorrplot::ggcorrplot(cormat, title = "Correlation of Numeric Variables")
+corrplot(cormat, main="\n\nCorrelation Plot for Numerical Variables", method="number")
+
+#find churned percentage. total churned percentage = 10%
+churned <- dataset_train_preproc %>% 
+  group_by(churned) %>% 
+  dplyr::summarise(Count = n())%>% 
+  mutate(percentage = prop.table(Count)*100)
+ggplot(churned, aes(reorder(churned, -percentage), percentage), fill = churned)+
+  geom_col(fill = c("green", "red"))+
+  geom_text(aes(label = sprintf("%.2f%%", percentage)))+
+  xlab("Churn") + 
+  ylab("Percent")+
+  ggtitle("Churn Percentage")
+
+
+########### variable selection ##################
+
+########### Model building ##################
+
+
+########### Logistic Regression with ROSE sampling ##################
+library(themis)
+
+target_var <- 'churned'
+model_form <- churned ~ total_transactions + total_revenue +  ageInYears + HQ_Employee_Count + NAICS_Code + Business_Code 
+model_type <- 'glm'
+positive_class <- "yes"
+negative_class <- "no"
+data_train <- dataset_train_preproc[,-2] #without churn date
+data_test <- dataset_test_preproc
+
+## Over Sampling with ROSE
+trControl <- trainControl(method = 'cv', number = 10, savePredictions = TRUE, classProbs = TRUE, summaryFunction = twoClassSummary, sampling = 'rose')
+
+
+#trControl <- trainControl(method = 'cv', number = 10, savePredictions = TRUE, classProbs = TRUE,summaryFunction = twoClassSummary,sampling = 'smote')
+
+glm_fit <- train(model_form, data = data_train, method = model_type, family = binomial, trControl = trControl, metric = 'ROC') 
+
+
+glm_probs <- predict(glm_fit, data_test, type = "prob")
+threshold <- 0.5
+
+glm_fit_pred <- glm_fit %>% predict(newdata = data_test, type = 'raw')
+
+
+confusionMatrix(glm_fit_pred, data_test[[target_var]], positive = positive_class)
+
+roc(data_test[[target_var]], glm_probs[, positive_class], plot = TRUE, print.auc = TRUE, legacy.axes = TRUE, levels = c(negative_class, positive_class))
+
+########### Logistic Regression with SMOTE sampling ##################
+
+model_recipe_smote <- recipe(model_form, data = data_train) %>% 
+  step_novel(all_predictors(), -all_numeric()) %>%
+  step_dummy(all_nominal(), -all_outcomes()) %>% 
+  step_zv(all_predictors()) %>% 
+  step_smote(target_var)
+
+
+smote_fit <- train(model_recipe_smote, data = data_train, method = model_type, trControl = trControl, metric = 'ROC') 
+smote_fit
+
+(smote_fit_cv_results <- smote_fit$results)
+
+smote_fit_pred <- smote_fit %>% predict(newdata = data_test, type = 'raw')
+
+
+smote_fit_probs <- predict(smote_fit, data_test, type = "prob")
+
+confusionMatrix(smote_fit_pred, data_test[[target_var]], positive = positive_class)
+
+(roc_test <- roc(data_test[[target_var]], smote_fit_probs[, positive_class], plot = TRUE, print.auc = TRUE, legacy.axes = TRUE, levels = c(negative_class, positive_class)))
+
+
+########### LDA ##################
+
+model_type <- "lda" 
+
+model_recipe <- recipe(model_form, data = data_train) %>% 
+                step_novel(all_predictors(), -all_numeric()) %>% 
+                step_dummy(all_nominal(), -all_outcomes()) %>% 
+                step_zv(all_predictors()) %>%
+                step_normalize(all_predictors()) %>%
+                step_smote(target_var)
+
+
+trControl <- trainControl(method = 'cv', number = 10, savePredictions = TRUE, classProbs = TRUE,
+                          summaryFunction = twoClassSummary)
+
+lda_fit <- train(model_recipe, data = data_train, method = model_type, trControl = trControl,  metric = 'ROC')
+
+lda_fit$finalModel
+
+confusionMatrix(lda_fit$pred$pred, lda_fit$pred$obs, positive = positive_class)
+
+
+lda_probs <- lda_fit %>% predict(newdata = data_test, type = 'prob')
+
+lda_pred <- lda_fit %>% predict(newdata = data_test, type = 'raw')
+
+confusionMatrix(lda_pred, data_test[[target_var]], positive = positive_class)
+
+
+(roc_test <- roc(data_test[[target_var]], lda_probs[, positive_class], plot = TRUE, print.auc = TRUE, legacy.axes = TRUE, levels = c(negative_class, positive_class)))
+
+
+########### KNN ##################
+
+model_type <- "knn" 
+
+model_recipe <- recipe(model_form, data = data_train) %>% 
+  step_novel(all_predictors(), -all_numeric()) %>%
+  step_dummy(all_nominal(), -all_outcomes()) %>% 
+  step_normalize(all_predictors()) %>%
+  step_nzv(all_predictors()) %>%
+  step_smote(target_var)
+
+
+trControl <- trainControl(method = 'cv', number = 10, savePredictions = TRUE, classProbs = TRUE, summaryFunction = twoClassSummary)
+
+
+knn_fit <- train(model_recipe, data = data_train, method = model_type, trControl = trControl, tuneLength = 7, metric='ROC')
+
+knn_fit
+
+(knn_fit_cv_results <- knn_fit$results)
+
+knn_probs <- knn_fit %>% predict(newdata = data_test, type = 'prob')
+
+knn_pred <- knn_fit %>% predict(newdata = data_test, type = 'raw')
+
+threshold <- 0.5
+knn_pred <- factor(ifelse(knn_probs[, positive_class] > threshold, positive_class, negative_class) , 
+                     levels = c(negative_class, positive_class))
+
+confusionMatrix(knn_pred, data_test[[target_var]], positive = positive_class)
+
+
+(roc_test <- roc(data_test[[target_var]], knn_probs[, positive_class], plot = TRUE, print.auc = TRUE, legacy.axes = TRUE, levels = c(negative_class, positive_class)))
+
+
+########### Decision tree ##################
+
+model_type <- "rpart" 
+
+model_recipe <- recipe(model_form, data = data_train) %>% 
+  step_novel(all_predictors(), -all_numeric()) %>%
+  step_dummy(all_nominal(), -all_outcomes()) %>% 
+  step_zv(all_predictors())%>%
+  step_normalize(all_predictors())%>%
+  step_smote(target_var)
+
+
+trControl <- trainControl(method = 'cv', number = 10, savePredictions = TRUE, classProbs = TRUE,
+                           summaryFunction = twoClassSummary)
+
+tGrid <- expand.grid(cp=c(0.0))
+
+tree_fit <- train(model_recipe, data = data_train, method = model_type,trControl = trControl, tuneGrid = tGrid, metric='ROC')
+
+
+tree_fit
+summary(tree_fit)
+#rpart.plot(tree_fit$finalModel, type = 3, extra = 1, under = TRUE, cex = 0.7)
+
+confusionMatrix(tree_fit$pred$pred, tree_fit$pred$obs, positive = positive_class)
+
+tree_probs <- tree_fit %>% predict(newdata = data_test, type = 'prob')
+
+threshold <- 0.5
+tree_pred <- factor(ifelse(tree_probs[, positive_class] > threshold, positive_class, negative_class) , 
+                     levels = c(negative_class, positive_class))
+
+confusionMatrix(tree_pred, data_test[[target_var]], positive = positive_class)
+
+(roc_test <- roc(data_test[[target_var]], tree_probs[, positive_class], plot = TRUE, print.auc = TRUE, legacy.axes = TRUE, levels = c(negative_class, positive_class)))
+
+
+########### Decision tree with pruning  ##################
+
+
+tree_prune_fit <- train(model_recipe, data = data_train, method = model_type, trControl = trControl, metric = 'ROC', tuneLength = 10)
+
+tree_prune_fit$results
+summary(tree_prune_fit)
+plot(tree_prune_fit)
+#rpart.plot(tree_prune_fit$finalModel, type = 1, extra = 1, under = TRUE)
+
+confusionMatrix(tree_prune_fit$pred$pred, tree_prune_fit$pred$obs, positive = positive_class)
+
+tree_prune_probs <- tree_prune_fit %>% predict(newdata = data_test, type = 'prob')
+
+threshold <- 0.5
+tree_prune_pred <- factor(ifelse(tree_prune_probs[, positive_class] > threshold, positive_class, negative_class),levels = c(negative_class, positive_class))
+
+confusionMatrix(tree_prune_pred, data_test[[target_var]], positive = positive_class)
+
+
+(roc_test <- roc(data_test[[target_var]], tree_prune_probs[, positive_class], plot = TRUE, print.auc = TRUE, legacy.axes = TRUE, levels = c(negative_class, positive_class)))
+
+
+########### Random Forest ##################
+
+library(randomForest)
+library(pROC)
+
+model_type <- "rf" 
+
+
+model_recipe <- recipe(model_form, data = data_train) %>% 
+  step_novel(all_predictors(), -all_numeric()) %>%
+  step_dummy(all_nominal(), -all_outcomes()) %>% 
+  step_zv(all_predictors())%>%
+  step_normalize(all_predictors())%>%
+  step_smote(target_var)  
+
+
+trControl <- trainControl(method = 'cv', number =10 , savePredictions = TRUE, classProbs = TRUE,
+                          summaryFunction = twoClassSummary,search = 'grid')
+
+
+
+tGrid <- expand.grid(mtry = 3)
+
+rf_fit <- train(model_recipe, data = data_train, method = model_type, trControl = trControl, metric = 'ROC',tuneGrid = tGrid ,ntree= 500)
+
+rf_fit
+rf_fit$results
+
+importance(rf_fit$finalModel)
+varImpPlot(rf_fit$finalModel)
+
+rf_probs <- rf_fit %>% predict(newdata = data_test, type = 'prob')
+
+threshold <- 0.5
+rf_pred <- factor(ifelse(rf_probs[, positive_class] > threshold, positive_class, negative_class) , 
+                     levels = c(negative_class, positive_class))
+
+confusionMatrix(rf_pred, data_test[[target_var]], positive = positive_class)
+
+
+(roc_test <- roc(data_test[[target_var]], rf_probs[, positive_class], plot = TRUE, print.auc = TRUE, legacy.axes = TRUE, levels = c(negative_class, positive_class)))
+
+
+########### XG Boost ##################
+
+library(xgboost)
+
+model_type <- "xgbTree" 
+
+model_recipe <- recipe(model_form, data = data_train) %>% 
+  step_novel(all_predictors(), -all_numeric()) %>%
+  step_dummy(all_nominal(), -all_outcomes()) %>% 
+  step_normalize(all_predictors()) %>%
+  step_zv(all_predictors()) %>%
+  step_smote(target_var)
+
+trControl <- trainControl(method = 'cv', number = 10, savePredictions = TRUE, classProbs = TRUE,
+                          summaryFunction = twoClassSummary,search = 'random')
+
+xgb_fit <- train(model_recipe, data = data_train, method = model_type, trControl = trControl, metric = 'ROC')
+
+xgb_fit
+
+summary(xgb_fit$finalModel)
+
+xgb_probs <- xgb_fit %>% predict(newdata = data_test, type = 'prob')
+
+threshold <- 0.5
+xgb_pred <- factor(ifelse(xgb_probs[, positive_class] > threshold, positive_class, negative_class) , 
+                     levels = c(negative_class, positive_class))
+
+confusionMatrix(xgb_pred, data_test[[target_var]], positive = positive_class)
+
+(roc_test <- roc(data_test[[target_var]], xgb_probs[, positive_class], plot = TRUE, print.auc = TRUE, legacy.axes = TRUE, levels = c(negative_class, positive_class)))
+
+
+########### SVC ##################
+if (0)
+{
+library(kernlab) 
+
+model_type <- "svmLinear"
+
+model_recipe <- recipe(model_form, data = data_train) %>% 
+  step_novel(all_predictors(), -all_numeric()) %>%
+  step_dummy(all_nominal(), -all_outcomes()) %>% 
+  step_zv(all_predictors())%>%
+  step_normalize(all_predictors())%>%
+  step_smote(target_var)
+
+trControl <- trainControl(method = 'cv', number = 10, savePredictions = TRUE, classProbs = TRUE, summaryFunction = twoClassSummary,search = 'grid')
+
+
+tGrid <- expand.grid(C = 1)
+
+svm_fit <- train(model_recipe,data = data_train,
+                 method = model_type, trControl = trControl, metric = 'ROC',tuneGrid = tGrid)
+
+confusionMatrix(svm_fit$pred$pred, svm_fit$pred$obs, positive = positive_class)
+
+svm_fit$finalModel
+
+svm_fit$results
+
+
+svm_probs <- svm_fit %>% predict(newdata = data_test, type = 'prob')
+
+threshold <- 0.5
+svm_pred <- factor(ifelse(svm_probs[, positive_class] > threshold, positive_class, negative_class) , 
+                     levels = c(negative_class, positive_class))
+
+confusionMatrix(svm_pred, data_test[[target_var]], positive = positive_class)
+
+
+(roc_test <- roc(data_test[[target_var]], svm_probs[, positive_class], plot = TRUE, print.auc = TRUE, legacy.axes = TRUE, levels = c(negative_class, positive_class)))
+
+}
+########### prepare Test data ##################
+########## bagImpute to fill NAs #############
+
+testFinal_num <- testFinal %>% select_if(is.numeric)
+testFinal_non_num <- testFinal %>% select_if(~!is.numeric(.x))
+
+bgimp <- preProcess(testFinal_num, method = "bagImpute")
+testFinal_bg <- cbind(testFinal_non_num, predict(bgimp, testFinal_num))
+
+####### standardize all the observations########
+stnd <- preProcess(testFinal_bg, method = c("center", "scale"))
+testFinal_bg_st <- predict(stnd, testFinal_bg)
+
+summary(testFinal_bg_st)
+
+
+
+########### Prediction on Test data using GB##################
+
+xgbt_probs <- xgb_fit %>% predict(newdata = testFinal_bg_st, type = 'prob')
+
+summary(xgbt_probs)
+
+dataset_gb_pred <- testFinal_bg_st
+
+dataset_gb_pred$churned_pred <- ifelse(xgbt_probs$yes > xgbt_probs$no,1,0)
+
+#Churn probabilities for the test set
+dataset_gb_pred$churn_prob <- xgbt_probs[,2]
+
+write.csv(dataset_gb_pred, file = "churn_prediction_gb.csv")
+
+
+#########################################################################################
+
+########### Prediction on Test data using RF##################
+
+rft_probs <- rf_fit %>% predict(newdata = testFinal_bg_st, type = 'prob')
+
+summary(rft_probs)
+
+
+dataset_rf_pred <- testFinal_bg_st
+
+dataset_rf_pred$churned_pred <- ifelse(rft_probs$yes > rft_probs$no,1,0)
+
+#Churn probabilities for the test set
+dataset_rf_pred$churn_prob <- rft_probs[,2]
+
+write.csv(dataset_rf_pred, file = "churn_prediction_rf.csv")
+
+
+#########################################################################################
+
+
+
+########### Prediction on Test data using KNN##################
+
+knnt_probs <- knn_fit %>% predict(newdata = testFinal_bg_st, type = 'prob')
+
+summary(knnt_probs)
+
+
+dataset_knn_pred <- testFinal_bg_st
+
+dataset_knn_pred$churned_pred <- ifelse(knnt_probs$yes > knnt_probs$no,1,0)
+
+#Churn probabilities for the test set
+dataset_knn_pred$churn_prob <- knnt_probs[,2]
+
+write.csv(dataset_knn_pred, file = "churn_prediction_knn.csv")
+
+
+#########################################################################################
+
+
+
+#########################################################################################
+
+
+
+########### Prediction on Test data using LDA##################
+
+ldat_probs <- lda_fit %>% predict(newdata = testFinal_bg_st, type = 'prob')
+
+summary(ldat_probs)
+
+
+dataset_lda_pred <- testFinal_bg_st
+
+dataset_lda_pred$churned_pred <- ifelse(ldat_probs$yes > ldat_probs$no,1,0)
+
+#Churn probabilities for the test set
+dataset_lda_pred$churn_prob <- ldat_probs[,2]
+
+write.csv(dataset_lda_pred, file = "churn_prediction_lda.csv")
+
+
+
+
+#########################################################################################
+
+
+
+
+#########################################################################################
+
+
+
+########### Prediction on Test data using GLM##################
+
+glmt_probs <- smote_fit %>% predict(newdata = testFinal_bg_st, type = 'prob')
+
+summary(glmt_probs)
+
+
+dataset_glm_pred <- testFinal_bg_st
+
+dataset_glm_pred$churned_pred <- ifelse(glmt_probs$yes > glmt_probs$no,1,0)
+
+#Churn probabilities for the test set
+dataset_glm_pred$churn_prob <- glmt_probs[,2]
+
+write.csv(dataset_glm_pred, file = "churn_prediction_glm.csv")
+
+
+
+
+#########################################################################################
+
+#########################################################################################
+
+
+
+########### Prediction on Test data using Decision Tree##################
+
+treet_probs <- tree_fit %>% predict(newdata = testFinal_bg_st, type = 'prob')
+
+summary(treet_probs)
+
+
+dataset_tree_pred <- testFinal_bg_st
+
+dataset_tree_pred$churned_pred <- ifelse(treet_probs$yes > treet_probs$no,1,0)
+
+#Churn probabilities for the test set
+dataset_tree_pred$churn_prob <- treet_probs[,2]
+
+write.csv(dataset_tree_pred, file = "churn_prediction_tree.csv")
+
+
+
+
+#########################################################################################
+
+
+######---Regression Models---#######
+
+
+library(ISLR)
+
+#Companies which are churned
+chunrned_dataset <- modelFinal[which(modelFinal$churned == "yes"),]
+
+summary(chunrned_dataset)
+plot_missing(chunrned_dataset)
+
+#using rf prediction data
+chunrned_testdata <- dataset_rf_pred[which(dataset_rf_pred$churned_pred == 1),]
+
+########## bagImpute to fill NAs #############
+
+chunrned_dataset_num <- chunrned_dataset %>% select_if(is.numeric)
+chunrned_dataset_non_num <- chunrned_dataset %>% select_if(~!is.numeric(.x))
+
+bgimp <- preProcess(chunrned_dataset_num, method = "bagImpute")
+chunrned_dataset_bg <- cbind(chunrned_dataset_non_num, predict(bgimp, chunrned_dataset_num))
+
+####### standardize all the observations########
+stnd <- preProcess(chunrned_dataset_bg, method = c("center", "scale"))
+chunrned_dataset_bg_st <- predict(stnd, chunrned_dataset_bg)
+
+summary(chunrned_dataset_bg_st)
+plot_missing(chunrned_dataset_bg_st)
+
+
+#convert churn_date back to numeric
+chunrned_dataset_bg_st$churn_date <- as.integer(as.character(chunrned_dataset_bg_st$churn_date))
+
+########### Linear Regression ##################
+
+target_var <- 'churn_date'
+#remove NAICS_Code + Business_Code as they are not significant 
+model_form <- churn_date ~ total_transactions + total_revenue +  ageInYears + HQ_Employee_Count 
+  #NAICS_Code + Business_Code 
+model_type <- 'lm'
+
+set.seed(1)
+
+trainIndex <- createDataPartition(chunrned_dataset_bg_st[[target_var]], p = 0.7, list = FALSE)
+data_train <- chunrned_dataset_bg_st[trainIndex,]
+data_test <- chunrned_dataset_bg_st[-trainIndex,]
+
+trControl <- trainControl(method = "cv", number = 10)
+
+model_recipe <- recipe(model_form, data = data_train) %>%  step_zv(all_predictors())
+
+lm_fit <- train(model_recipe, data = data_train, method = model_type, trControl = trControl)
+
+
+# step 4: evaluate the model
+summary(lm_fit)
+lm_fit$finalModel
+
+#vif(lm_fit$finalModel)
+#lm_fit_importance <- varImp(lm_fit)
+#plot(lm_fit_importance)
+#vif is equal or higher for Business_Code and NAICS_Code
+
+#remove and rebuild 
+
+lm_pred <- predict(lm_fit, newdata = data_test)
+postResample(lm_pred, data_test[[target_var]])
+
+library(ggfortify)
+autoplot(lm_fit$finalModel)
+
+########### Ridge Regression ##################
+library(glmnet)
+library(Metrics)
+
+model_type <- 'glmnet'
+
+set.seed(1)
+
+trControl <- trainControl(method = 'cv', number = 10, savePredictions = TRUE)
+#tGrid <- expand.grid(alpha = c(0), lambda = 10^seq(5, -3, length = 100)) 
+tGrid <- expand.grid(alpha = c(0), lambda = seq(1, 100000, by = 10000)) 
+
+model_recipe <- recipe(model_form, data = data_train) %>% 
+  step_novel(all_predictors(), -all_numeric()) %>%
+  step_unknown(all_predictors(), -all_numeric()) %>%
+  step_dummy(all_nominal(), -all_outcomes()) %>%
+  step_normalize(all_predictors()) %>%
+  step_zv(all_predictors())
+
+ridge <- train(model_recipe, data = data_train, method = model_type, trControl = trControl, tuneGrid = tGrid)
+
+ridge
+plot(ridge)
+
+
+ridge_pred <- predict(ridge, newdata = data_test, type = 'raw')
+(rmse_ridge <- postResample(pred = ridge_pred, obs= data_test[[target_var]]))
+rmse_ridge
+mse(data_test[[target_var]], ridge_pred)
+
+
+########### Lasso Regression ##################
+
+tGrid <- expand.grid(alpha = c(1), lambda = 10^seq(4, -4, length = 100)) 
+
+model_recipe <- recipe(model_form, data = data_train) %>% 
+  step_novel(all_predictors(), -all_numeric()) %>%
+  step_unknown(all_predictors(), -all_numeric()) %>%
+  step_dummy(all_nominal(), -all_outcomes()) %>%
+  step_normalize(all_predictors()) %>%
+  step_zv(all_predictors())
+
+lasso <- train(model_recipe, data = data_train, method = model_type, trControl = trControl, tuneGrid = tGrid)
+
+lasso
+plot(lasso)
+
+(lasso_best_coef <- coef(lasso$finalModel, lasso$bestTune$lambda))
+
+lasso_pred <- predict(lasso, newdata = data_test, type = 'raw')
+rmse_lasso <- postResample(pred = lasso_pred, obs= data_test[[target_var]])
+rmse_lasso
+mse(data_test[[target_var]], lasso_pred)
+
+
+#Prediction in test set
+chunrned_testdata$churn_date <- predict(lm_fit, newdata = chunrned_testdata, type = 'raw')
+chunrned_testdata$churn_date <- as.integer(chunrned_testdata$churn_date)
+
+write.csv(chunrned_testdata, file = "churn_prediction_regression.csv")
+
+
+```
+
+
+
+
